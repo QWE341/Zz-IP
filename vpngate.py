@@ -50,8 +50,9 @@ VPNGATE_MIRROR = os.environ.get(
     "VPNGATE_MIRROR",
     "https://raw.githubusercontent.com/fdciabdul/Vpngate-Scraper-API/main/json/data.json",
 )
-# 已部署的 Cloudflare Worker 检测接口 (GET /check?proxyip=host:port, 实测确认)
-WORKER_CHECK_URL = os.environ.get("CHECK_WORKER", "https://zza.darui.ccwu.cc/check?sstp=vpn:vpn@")
+# 已部署的 edgetunnel Worker 检测接口 (admin/check, 需先登录)
+WORKER_CHECK_URL = os.environ.get("CHECK_WORKER", "https://zza.darui.ccwu.cc/admin/check?sstp=vpn:vpn@")
+WORKER_ADMIN_PASSWORD = os.environ.get("WORKER_ADMIN_PASSWORD", "21276Wan")
 CONCURRENCY = max(1, int(os.environ.get("CHECK_CONCURRENCY", "32")))   # 与 Worker 网页端一致的并发模型
 CHECK_TIMEOUT = float(os.environ.get("CHECK_TIMEOUT", "90"))          # 单请求客户端超时 (秒)
 MAX_CHECK_NODES = int(os.environ.get("MAX_CHECK_NODES", "0"))         # 0=不限; 本地测试可设小值
@@ -348,6 +349,20 @@ def check_one(node, session):
                 "is_datacenter": exit_info.get("is_datacenter"),
             }
             out["residential"] = classify_network(out["host"], org, exit_info.get("is_datacenter"))
+        elif j.get("ip") or j.get("loc"):
+            # edgetunnel admin/check 格式: 顶层 ip + loc(国家码)
+            out["exit"] = {
+                "ip": j.get("ip"),
+                "country": j.get("loc"),
+                "country_code": j.get("loc"),
+                "city": None,
+                "continent": None,
+                "asn": None,
+                "org": None,
+                "type": None,
+                "is_datacenter": True,
+            }
+            out["residential"] = classify_network(out["host"], None, True)
         else:
             out["residential"] = classify_network(out["host"], None, None)
         return out
@@ -355,6 +370,28 @@ def check_one(node, session):
         out["error"] = f"{type(exc).__name__}: {exc}"
         out["worker_error"] = True
         return out
+
+
+def worker_login(session):
+    """登录 edgetunnel Worker, 获取 admin cookie。"""
+    from urllib.parse import urlparse
+    parsed = urlparse(WORKER_CHECK_URL)
+    login_url = f"{parsed.scheme}://{parsed.netloc}/login"
+    try:
+        r = session.post(
+            login_url,
+            data={"password": WORKER_ADMIN_PASSWORD},
+            timeout=15,
+            headers={"User-Agent": "Mozilla/5.0 (gate-checker)"},
+        )
+        if r.status_code == 200 and r.json().get("success"):
+            log("CLOUDFLARE WORKER", "登录成功, 已获取 admin cookie")
+            return True
+        log("CLOUDFLARE WORKER", f"登录失败: HTTP {r.status_code} {r.text[:200]}")
+        return False
+    except Exception as exc:
+        log("CLOUDFLARE WORKER", f"登录异常: {type(exc).__name__}: {exc}")
+        return False
 
 
 def check_all(nodes, session):
@@ -522,7 +559,7 @@ def build_hosts_text(data):
 
 
 # edgetunnel 完整订阅 (vless://) 配置
-EDT_UUID = os.environ.get("EDT_UUID", "90c14586-42a5-4c30-959d-8b36608d67f7")
+EDT_UUID = os.environ.get("EDT_UUID", "79f45dfb-af43-4bc7-a0d3-2195c0d2b560")
 EDT_DOMAIN = os.environ.get("EDT_DOMAIN", "ed.xiaolei.qzz.io")
 EDT_FINGERPRINT = os.environ.get("EDT_FINGERPRINT", "chrome")
 SUB_URL = os.environ.get("SUB_URL", "https://jerylihub.github.io/gate/sub.txt")
@@ -665,7 +702,10 @@ def main():
     log("VPN GATE", f"SSTP 节点: {sstp_count}")
     log("VPN GATE", f"去重后: {len(uniq)}")
 
-    # 3) 并发检测
+    # 3) 登录 Worker + 并发检测
+    log("CLOUDFLARE WORKER", f"登录: {WORKER_CHECK_URL.split('/admin/')[0]}")
+    if not worker_login(session):
+        die("Worker 登录失败, 请检查 WORKER_ADMIN_PASSWORD 是否与 Worker 环境变量一致")
     log("CLOUDFLARE WORKER", f"提交检测: {len(uniq)} (并发 {CONCURRENCY}, 单请求超时 {CHECK_TIMEOUT}s)")
     t0 = time.time()
     results = check_all(uniq, session)
@@ -704,4 +744,3 @@ if __name__ == "__main__":
         raise
     except Exception as exc:
         die(f"程序异常: {type(exc).__name__}: {exc}")
-#（注：内容由AI生成）
